@@ -1,4 +1,4 @@
-// Stage 1: Calculate m = T[63:0] * N_INV
+// cxalculate m
 module reduction_stage1 (
     input  logic clk,
     input  logic [127:0] T,
@@ -31,7 +31,7 @@ module reduction_stage1 (
     assign ready_out = valid;
 endmodule
 
-// Stage 2: Calculate t_full = T + (m * N)
+// calculate t_full = T + (m * N)
 module reduction_stage2 (
     input  logic clk,
     input  logic [127:0] T,
@@ -61,7 +61,7 @@ module reduction_stage2 (
     assign ready_out = valid;
 endmodule
 
-// Stage 3: Calculate t[127:64] and final comparison
+//calculate t[127:64] and final comparison
 module reduction_stage3 (
     input  logic clk,
     input  logic [127:0] t_full,
@@ -93,7 +93,7 @@ module reduction_stage3 (
     assign ready_out = valid;
 endmodule
 
-// Top-level reduction module connecting all 3 stages
+//  reduction module connecting all 3 stages
 module reduction (
     input  logic clk,
     input  logic [127:0] T,
@@ -103,7 +103,7 @@ module reduction (
     output logic ready_out,
     input  logic given
 );
-    // Interconnect signals
+    // connection signals
     logic [127:0] T_stage1_out;
     logic [63:0] m_stage1;
     logic ready_out_stage1, ready_in_stage2;
@@ -161,11 +161,11 @@ endmodule
 module montgomery_convert_in (
     input  logic        clk,
     input  logic [63:0] a,
-    input  logic        taken,        // We successfully took input
-    output logic        ready_in,     // We are ready to receive input
+    input  logic        taken,        
+    output logic        ready_in,     
     output logic [63:0] a_bar,
-    output logic        ready_out,    // We have output ready
-    input  logic        given         // Next module successfully took our output
+    output logic        ready_out,    
+    input  logic        given         
 );
     localparam logic [63:0] R2 = 64'he1;
 
@@ -174,7 +174,7 @@ module montgomery_convert_in (
     logic ready_redc_in;
     logic given_to_redc;
 
-    // Stage 1: Multiply a * R2
+    // Multiply a * R2
     always_ff @(posedge clk) begin
         if (taken) begin
             T <= a * R2;
@@ -184,10 +184,9 @@ module montgomery_convert_in (
         end
     end
 
-    // Ready to accept input when multiplication stage is free
+    // ready to accept input when multiplication stage is free
     assign ready_in = !valid_mult || (valid_mult && ready_redc_in);
     
-    // Handshaking with reduction module
     assign given_to_redc = valid_mult && ready_redc_in;
 
     // Reduction module
@@ -206,18 +205,18 @@ module montgomery_mul (
     input  logic        clk,
     input  logic [63:0] a_bar,
     input  logic [63:0] b_bar,
-    input  logic        taken,        // We successfully took input
-    output logic        ready_in,     // We are ready to receive input
+    input  logic        taken,        
+    output logic        ready_in,     
     output logic [63:0] out_bar,
-    output logic        ready_out,    // We have output ready
-    input  logic        given         // Next module successfully took our output
+    output logic        ready_out,    
+    input  logic        given         
 );
     logic [127:0] T;
     logic valid_mult;
     logic ready_redc_in;
     logic given_to_redc;
 
-    // Stage 1: Multiply a_bar * b_bar
+    // multiply a_bar * b_bar
     always_ff @(posedge clk) begin
         if (taken) begin
             T <= a_bar * b_bar;
@@ -244,18 +243,18 @@ endmodule
 module montgomery_convert_out (
     input  logic        clk,
     input  logic [63:0] a_bar,
-    input  logic        taken,        // We successfully took input
-    output logic        ready_in,     // We are ready to receive input
+    input  logic        taken,        
+    output logic        ready_in,     
     output logic [63:0] a,
-    output logic        ready_out,    // We have output ready
-    input  logic        given         // Next module successfully took our output
+    output logic        ready_out,    
+    input  logic        given         
 );
     logic [127:0] T;
     logic valid_prep;
     logic ready_redc_in;
     logic given_to_redc;
 
-    // Stage 1: Prepare T with zero extension
+
     always_ff @(posedge clk) begin
         if (taken) begin
             T <= {64'd0, a_bar};
@@ -283,11 +282,11 @@ module montgomery_top (
     input  logic        clk,
     input  logic [63:0] a,
     input  logic [63:0] b,
-    input  logic        taken,        // We successfully took input
-    output logic        ready_in,     // We are ready to receive input
+    input  logic        taken,        
+    output logic        ready_in,     
     output logic [63:0] result,
-    output logic        ready_out,    // We have output ready
-    input  logic        given         // Next module successfully took our output
+    output logic        ready_out,    
+    input  logic        given         
 );
     // Signals between modules
     logic [63:0] a_bar, b_bar;
@@ -298,32 +297,27 @@ module montgomery_top (
     logic taken_a, taken_b, taken_mul, taken_out;
     logic given_a, given_b, given_mul, given_out;
     
-    // Registers to hold a and b inputs
     logic [63:0] a_reg, b_reg;
     logic inputs_valid;
     
-    // Input capture
     always_ff @(posedge clk) begin
         if (taken) begin
             a_reg <= a;
             b_reg <= b;
             inputs_valid <= 1'b1;
         end else if (taken_a && taken_b) begin
-            // Inputs have been consumed by convert modules
+            // inputs have been taken by convert modules
             inputs_valid <= 1'b0;
         end
     end
     
-    // Ready to accept new input when:
-    // 1. No valid inputs stored, OR
-    // 2. Valid inputs stored but both convert modules are ready to take them
+    
     assign ready_in = !inputs_valid || (ready_in_a && ready_in_b);
     
     // Convert modules take input when we have valid inputs and they're ready
     assign taken_a = inputs_valid && ready_in_a && ready_in_b;
     assign taken_b = inputs_valid && ready_in_a && ready_in_b;
 
-    // Convert a to Montgomery domain
     montgomery_convert_in u_in_a (
         .clk(clk),
         .a(a_reg),
@@ -334,7 +328,6 @@ module montgomery_top (
         .given(given_a)
     );
 
-    // Convert b to Montgomery domain
     montgomery_convert_in u_in_b (
         .clk(clk),
         .a(b_reg),
@@ -345,15 +338,13 @@ module montgomery_top (
         .given(given_b)
     );
 
-    // Wait for both conversions, then pass to multiplier
-    // Both outputs must be ready before mul can take them
+    // after both conversions pass to multiplier
     logic both_ready;
     assign both_ready = ready_out_a && ready_out_b;
     assign taken_mul = both_ready && ready_in_mul;
     assign given_a = taken_mul;
     assign given_b = taken_mul;
 
-    // Montgomery multiplication
     montgomery_mul u_mul (
         .clk(clk),
         .a_bar(a_bar),
@@ -365,7 +356,6 @@ module montgomery_top (
         .given(given_mul)
     );
 
-    // Convert out of Montgomery domain
     assign taken_out = ready_out_mul && ready_in_out;
     assign given_mul = taken_out;
 
