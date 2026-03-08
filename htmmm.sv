@@ -1,96 +1,190 @@
 // Stage 1: Calculate m = T[63:0] * N_INV
 module reduction_stage1 (
     input  logic clk,
+
+    //T in montgomery
     input  logic [127:0] T,
+
+    //if taken = 1 at the rising edge of the clock this stage captures the input and processes it
     input  logic taken,
+
+    //ready_in tells the previous block whether this stage is ready to accept a new input ie
+    //ready_in = 1 means it can take data and ready_in = 0 means it is busy
     output logic ready_in,
+
+    //stored copy of T that will be passed to the next stage.
     output logic [127:0] T_out,
+
+    //Q or m in montgomery
     output logic [63:0] m,
+
+    //ready_out tells the next stage whether this stage has valid output ready ie
+    //if ready_out = 1 means output is valid and if ready_out = 0 means no valid data yet
     output logic ready_out,
+
+    //if given = 1 the next stage has already taken this stage's output
+    //so it can clear it's valid flag.
     input  logic given,
-    //to check if tl=0 we make a new register
-    output logic tl_zero //htmmm addition
+
+
+    //to check if TL=0 ie tl_zero = 1 means T[63:0] == 0
+    output logic tl_zero 
 );
+    //M' in Montgomery
     localparam logic [63:0] N_INV = 64'heeeeeeeeeeeeeeef;
-    logic [127:0] T_reg = 128'd0; 
+
+    //T_reg is mainly used to make it clear that this is an internal pipeline register
+    //and T_out is just the output view of that register
+    logic [127:0] T_reg = 128'd0;
+
+    //again same thing as T_reg and T_out 
     logic [63:0]  m_reg = 64'd0;
-    //local register to check if tl=0   
-    logic tl_zerocheck_reg = 1'b0; //htmmm addition
+
+
+    //register to check if TL=0 (same logic as T_reg and T_out)  
+    logic tl_zerocheck_reg = 1'b0; 
+
+    //valid = 0 means stage is empty
+    //valid = 1 means stage contains ready output
+    //because this stage finishes its work in the same clock edge where it accepts input.
     logic valid = 1'b0; 
     
     always_ff @(posedge clk) begin
-        logic [127:0] m_tmp; 
+
+        //helper register 
+        logic [127:0] m_tmp;
+
+        //If taken = 1 this stage is accepting a new input now
         if (taken) begin
-            T_reg <= T;
+        
+            //after the clock edge, T_reg will hold the current T
+            T_reg <= T; 
+
+            //compute full 128-bit product of T_low and N_INV
             m_tmp = ({64'd0, T[63:0]} * {64'd0, N_INV}); 
+
+            //m = (T_low * N_INV) mod 2^64, so keep only lower 64 bits
             m_reg <= m_tmp[63:0];
-            tl_zerocheck_reg <= (T[63:0] == 64'd0); //htmmm addition                       
+
+            //remember whether lower 64 bits of T ie TL are zero
+            tl_zerocheck_reg <= (T[63:0] == 64'd0);   
+
+            //output ready                     
             valid <= 1'b1;
         end 
+
         else if (given) begin
+
+            //clear valid after next stage accepts this output
             valid <= 1'b0;
         end
     end
     
+    //passing useful data forward
     assign T_out = T_reg;
     assign m = m_reg;
-    assign tl_zero = tl_zerocheck_reg; //htmmm addition
+    assign tl_zero = tl_zerocheck_reg; 
+
+    //setting control signals
     assign ready_in = !valid || given;
     assign ready_out = valid;
+
 endmodule
 
 
-// Stage 2: Calculate t_full = T + (m * N)
+
+
+// Stage 2: Compute upper-part HTMMM sum using T_H, high(m*N), and carry correction
 module reduction_stage2 (
     input  logic clk,
+
+    //128-bit T passed from stage 1
     input  logic [127:0] T,
+
+    //m = (TL​*N_INV) mod 2^64
     input  logic [63:0] m,
-    input logic tl_zero, //htmmm addition
+
+    //signal from stage 1 telling stage 2 whether TL=T[63:0]=0
+    input logic tl_zero, 
+
+    //same as above
     input  logic taken,
     output logic ready_in,
-    output logic [64:0] t_htmmm, //htmmm change
-    output logic tl_zero_out, //htmmm addition
     output logic ready_out,
-    input  logic given
+    input  logic given,
+
+    //t_htmmm = TH ​+ SH + carry
+    output logic [64:0] t_htmmm, 
+
+    //passes the tl_zero information forward to the next stage
+    output logic tl_zero_out 
+    
 );
     localparam logic [63:0] N = 64'hFFFFFFFFFFFFFFF1;
-    logic [64:0] t_htmmm_reg = 65'd0; //htmmm change
-    logic tl_zerocheck_reg = 1'b0; //htmmm addition
+
+    //internal register that stores the computed stage 2 result 
+    //(possible extra carry makes result 65 bits)
+    logic [64:0] t_htmmm_reg = 65'd0; 
+
+    //stores the incoming tl_zero so it can be passed onward as a registered signal.
+    logic tl_zerocheck_reg = 1'b0; 
+
+    //same as before ie valid = 1 means t_htmmm_reg contains valid output for the next stage
     logic valid = 1'b0;  
     
     always_ff @(posedge clk) begin
         if (taken) begin
+
+            //stores the full 128-bit product of m * N
             logic [127:0] prod;
-            logic [63:0] s_h; //htmmm addition
-            logic [64:0] c; //htmmm addition
+
+            //temporary variable for the high 64 bits of the product m * N
+            logic [63:0] s_h; 
+
+            //temporary variable for the sum
+            //c = TH + SH + carry
+            logic [64:0] c; 
+
+
             prod = ({64'd0, m} * {64'd0, N});           
             s_h = prod[127:64];
-            //C = T_H + S_H
-            c = {1'b0, T[127:64]} + {1'b0, s_h}; //htmmm addition
-            if (!tl_zero) begin //htmmm addition
+            c = {1'b0, T[127:64]} + {1'b0, s_h}; 
+
+            //// if lower half of T is non-zero add carry correction of 1 to upper-part sum
+            if (!tl_zero) begin 
                 c = c + 65'd1;
             end
-            t_htmmm_reg <= c; //htmmm addition
-            tl_zerocheck_reg <= tl_zero; //htmmm addition
+
+            //t_htmmm_reg holds the result for the next stage.
+            t_htmmm_reg <= c; 
+
+            //forward tl_zero to next stage as a registered signal
+            tl_zerocheck_reg <= tl_zero;
+
+            //valid same as above 
             valid <= 1'b1;
-        end 
+        end
+ 
         else if (given) begin
             valid <= 1'b0;
         end
     end
     
-    assign t_htmmm = t_htmmm_reg; //htmmm changed
-    assign tl_zero_out = tl_zerocheck_reg; //htmmm addition
+    //same assignment technique as above
+    assign t_htmmm = t_htmmm_reg; 
+    assign tl_zero_out = tl_zerocheck_reg; 
     assign ready_in = !valid || given;
     assign ready_out = valid;
 endmodule
+
+
 
 
 // Stage 3: Calculate t[127:64] and final comparison
 module reduction_stage3 (
     input  logic clk,
-    input  logic [64:0] t_htmmm, //htmmm changed
-    input tl_zero, //htmmm addition
+    input  logic [64:0] t_htmmm, 
+    input tl_zero, 
     input  logic taken,
     output logic ready_in,
     output logic [63:0] S,
@@ -105,7 +199,7 @@ module reduction_stage3 (
         if (taken) begin
             logic [64:0] t;       
             logic [64:0] t_minus; 
-            t = t_htmmm; //htmmm changed 
+            t = t_htmmm;  
             if (t >= {1'b0, N}) begin
                 t_minus = t - {1'b0, N}; 
                 S_reg <= t_minus[63:0];  
@@ -137,12 +231,12 @@ module reduction (
 );
     logic [127:0] T_stage1_out;
     logic [63:0]  m_stage1;
-    logic tl_zero_stage1; //htmmm addition
+    logic tl_zero_stage1; 
     logic ready_out_stage1, ready_in_stage2;
     logic taken_stage2, given_stage1;
     
-    logic [64:0] t_htmmm_stage2; //htmmm changed
-    logic tl_zero_stage2; //htmmm addition 
+    logic [64:0] t_htmmm_stage2; 
+    logic tl_zero_stage2;  
     logic ready_out_stage2, ready_in_stage3;
     logic taken_stage3, given_stage2;
     
@@ -154,8 +248,8 @@ module reduction (
         .T_out(T_stage1_out),
         .m(m_stage1),
         .ready_out(ready_out_stage1),
-        .given(given_stage1)
-        .tl_zero(tl_zero_stage1) //htmmm addition
+        .given(given_stage1),
+        .tl_zero(tl_zero_stage1) 
     );
     
     assign taken_stage2 = ready_out_stage1 && ready_in_stage2;
@@ -165,11 +259,11 @@ module reduction (
         .clk(clk),
         .T(T_stage1_out),
         .m(m_stage1),
-        .tl_zero(tl_zero_stage1), //htmmm addition
+        .tl_zero(tl_zero_stage1), 
         .taken(taken_stage2),
         .ready_in(ready_in_stage2),
-        .t_htmmm(t_htmmm_stage2), //htmmm changed
-        .tl_zero_out(tl_zero_stage2), //htmmm addition
+        .t_htmmm(t_htmmm_stage2), 
+        .tl_zero_out(tl_zero_stage2), 
         .ready_out(ready_out_stage2),
         .given(given_stage2)
     );
@@ -179,8 +273,8 @@ module reduction (
     
     reduction_stage3 u_stage3 (
         .clk(clk),
-        .t_htmmm(t_htmmm_stage2), //htmmm changed
-        .tl_zero(tl_zero_stage2), //htmmm addition
+        .t_htmmm(t_htmmm_stage2), 
+        .tl_zero(tl_zero_stage2), 
         .taken(taken_stage3),
         .ready_in(ready_in_stage3),
         .S(S),
@@ -324,8 +418,8 @@ module montgomery_top (
     logic taken_a, taken_b, taken_mul, taken_out;
     logic given_a, given_b, given_mul;
     
-    logic [63:0] a_reg, b_reg;
-    logic inputs_valid;
+    logic [63:0] a_reg = 64'd0, b_reg = 64'd0;
+    logic inputs_valid = 1'b0;
 
     always_ff @(posedge clk) begin
         if (taken) begin
