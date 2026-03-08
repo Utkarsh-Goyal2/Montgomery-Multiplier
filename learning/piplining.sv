@@ -30,7 +30,7 @@ module reduction_stage1 (
     assign ready_in = !valid || given;
     assign ready_out = valid;
 endmodule
-
+  
 // calculate t_full = T + (m * N)
 module reduction_stage2 (
     input  logic clk,

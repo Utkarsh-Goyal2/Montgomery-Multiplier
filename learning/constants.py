@@ -16,7 +16,7 @@ def find_R(m):
     R = 1
     while R <= m:
         R <<= 1
-    return R
+    return R << 2
 
 def find_constants(m):
     R = find_R(m)
