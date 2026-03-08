@@ -191,13 +191,13 @@ endmodule
 
 
 module montgomery_convert_in (
-    input  logic        clk,
+    input  logic clk,
     input  logic [63:0] a,
-    input  logic        taken,
-    output logic        ready_in,
+    input  logic taken,
+    output logic ready_in,
     output logic [63:0] a_bar,
-    output logic        ready_out,
-    input  logic        given
+    output logic ready_out,
+    input  logic given
 );
     localparam logic [63:0] R2 = 64'he1;
     logic [127:0] T = 128'd0;   
@@ -231,14 +231,14 @@ endmodule
 
 
 module montgomery_mul (
-    input  logic        clk,
+    input  logic clk,
     input  logic [63:0] a_bar,
     input  logic [63:0] b_bar,
-    input  logic        taken,
-    output logic        ready_in,
+    input  logic taken,
+    output logic ready_in,
     output logic [63:0] out_bar,
-    output logic        ready_out,
-    input  logic        given
+    output logic ready_out,
+    input  logic given
 );
     logic [127:0] T = 128'd0; 
     logic valid_mult = 1'b0;  
@@ -271,13 +271,13 @@ endmodule
 
 
 module montgomery_convert_out (
-    input  logic        clk,
+    input  logic clk,
     input  logic [63:0] a_bar,
-    input  logic        taken,
-    output logic        ready_in,
+    input  logic taken,
+    output logic ready_in,
     output logic [63:0] a,
-    output logic        ready_out,
-    input  logic        given
+    output logic ready_out,
+    input  logic given
 );
     logic [127:0] T = 128'd0; 
     logic valid_prep = 1'b0;  
@@ -309,14 +309,14 @@ endmodule
 
 
 module montgomery_top (
-    input  logic        clk,
+    input  logic clk,
     input  logic [63:0] a,
     input  logic [63:0] b,
-    input  logic        taken,
-    output logic        ready_in,
+    input  logic taken,
+    output logic ready_in,
     output logic [63:0] result,
-    output logic        ready_out,
-    input  logic        given
+    output logic ready_out,
+    input  logic given
 );
     logic [63:0] a_bar, b_bar, ab_bar;
     logic ready_in_a, ready_in_b, ready_in_mul, ready_in_out;
