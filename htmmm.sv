@@ -1,469 +1,271 @@
-// Stage 1: Calculate m = T[63:0] * N_INV
-module reduction_stage1 (
-    input  logic clk,
-
-    //T in montgomery
-    input  logic [127:0] T,
-
-    //if taken = 1 at the rising edge of the clock this stage captures the input and processes it
-    input  logic taken,
-
-    //ready_in tells the previous block whether this stage is ready to accept a new input ie
-    //ready_in = 1 means it can take data and ready_in = 0 means it is busy
-    output logic ready_in,
-
-    //stored copy of T that will be passed to the next stage.
-    output logic [127:0] T_out,
-
-    //Q or m in montgomery
-    output logic [63:0] m,
-
-    //ready_out tells the next stage whether this stage has valid output ready ie
-    //if ready_out = 1 means output is valid and if ready_out = 0 means no valid data yet
-    output logic ready_out,
-
-    //if given = 1 the next stage has already taken this stage's output
-    //so it can clear it's valid flag.
-    input  logic given,
-
-
-    //to check if TL=0 ie tl_zero = 1 means T[63:0] == 0
-    output logic tl_zero 
+module multiply #(
+    parameter N = 4
+)(
+    input  logic             clk,
+    input  logic [N+1:0]     a,
+    input  logic [N+1:0]     b,
+    output logic [2*N+1:0]   T,
+    output logic [N+1:0]     T_L,
+    output logic [N-1:0]     T_H
 );
-    //M' in Montgomery
-    localparam logic [63:0] N_INV = 64'heeeeeeeeeeeeeeef;
+    logic [2*N+1:0] product;
 
-    //T_reg is mainly used to make it clear that this is an internal pipeline register
-    //and T_out is just the output view of that register
-    logic [127:0] T_reg = 128'd0;
-
-    //again same thing as T_reg and T_out 
-    logic [63:0]  m_reg = 64'd0;
-
-
-    //register to check if TL=0 (same logic as T_reg and T_out)  
-    logic tl_zerocheck_reg = 1'b0; 
-
-    //valid = 0 means stage is empty
-    //valid = 1 means stage contains ready output
-    //because this stage finishes its work in the same clock edge where it accepts input.
-    logic valid = 1'b0; 
-    
-    always_ff @(posedge clk) begin
-
-        //helper register 
-        logic [127:0] m_tmp;
-
-        //If taken = 1 this stage is accepting a new input now
-        if (taken) begin
-        
-            //after the clock edge, T_reg will hold the current T
-            T_reg <= T; 
-
-            //compute full 128-bit product of T_low and N_INV
-            m_tmp = ({64'd0, T[63:0]} * {64'd0, N_INV}); 
-
-            //m = (T_low * N_INV) mod 2^64, so keep only lower 64 bits
-            m_reg <= m_tmp[63:0];
-
-            //remember whether lower 64 bits of T ie TL are zero
-            tl_zerocheck_reg <= (T[63:0] == 64'd0);   
-
-            //output ready                     
-            valid <= 1'b1;
-        end 
-
-        else if (given) begin
-
-            //clear valid after next stage accepts this output
-            valid <= 1'b0;
-        end
+    always_comb begin
+        product = a * b;
     end
-    
-    //passing useful data forward
-    assign T_out = T_reg;
-    assign m = m_reg;
-    assign tl_zero = tl_zerocheck_reg; 
 
-    //setting control signals
-    assign ready_in = !valid || given;
-    assign ready_out = valid;
-
+    always_ff @(posedge clk) begin
+        T   <= product;
+        T_L <= product[N+1:0];
+        T_H <= product[2*N+1 : N+2];
+    end
 endmodule
 
 
-
-
-// Stage 2: Compute upper-part HTMMM sum using T_H, high(m*N), and carry correction
-module reduction_stage2 (
-    input  logic clk,
-
-    //128-bit T passed from stage 1
-    input  logic [127:0] T,
-
-    //m = (TL​*N_INV) mod 2^64
-    input  logic [63:0] m,
-
-    //signal from stage 1 telling stage 2 whether TL=T[63:0]=0
-    input logic tl_zero, 
-
-    //same as above
-    input  logic taken,
-    output logic ready_in,
-    output logic ready_out,
-    input  logic given,
-
-    //t_htmmm = TH ​+ SH + carry
-    output logic [64:0] t_htmmm, 
-
-    //passes the tl_zero information forward to the next stage
-    output logic tl_zero_out 
-    
+// NLTM : NAF Low-part Truncated Multiplication
+// Low-part truncation: only keep bits [N+1:0] of each product
+// D = R - T_L = ~T_L + 1  (used later by NFHTM for error compensation)
+module NLTM #(
+    parameter N = 4,
+    // NAF positive part of M'
+    parameter [N+1:0] M_INV_POS  = 6'b010000,   // example: +16
+    // NAF negative part of M'
+    parameter [N+1:0] M_INV_NEG  = 6'b000001    // example: -1  => M'=15
+)(
+    input  logic         clk,
+    input  logic [N+1:0] T_L,
+    output logic [N+1:0] Q_L,
+    output logic [N+1:0] D
 );
-    localparam logic [63:0] N = 64'hFFFFFFFFFFFFFFF1;
+    // accumulators for low-part truncated multiplication
+    logic [N+2:0] pos_acc;   // one extra guard bit for borrowing
+    logic [N+2:0] neg_acc;
 
-    //internal register that stores the computed stage 2 result 
-    //(possible extra carry makes result 65 bits)
-    logic [64:0] t_htmmm_reg = 65'd0; 
+    always_comb begin
+        pos_acc = '0;
+        neg_acc = '0;
 
-    //stores the incoming tl_zero so it can be passed onward as a registered signal.
-    logic tl_zerocheck_reg = 1'b0; 
-
-    //same as before ie valid = 1 means t_htmmm_reg contains valid output for the next stage
-    logic valid = 1'b0;  
-    
-    always_ff @(posedge clk) begin
-        if (taken) begin
-
-            //stores the full 128-bit product of m * N
-            logic [127:0] prod;
-
-            //temporary variable for the high 64 bits of the product m * N
-            logic [63:0] s_h; 
-
-            //temporary variable for the sum
-            //c = TH + SH + carry
-            logic [64:0] c; 
-
-
-            prod = ({64'd0, m} * {64'd0, N});           
-            s_h = prod[127:64];
-            c = {1'b0, T[127:64]} + {1'b0, s_h}; 
-
-            //// if lower half of T is non-zero add carry correction of 1 to upper-part sum
-            if (!tl_zero) begin 
-                c = c + 65'd1;
-            end
-
-            //t_htmmm_reg holds the result for the next stage.
-            t_htmmm_reg <= c; 
-
-            //forward tl_zero to next stage as a registered signal
-            tl_zerocheck_reg <= tl_zero;
-
-            //valid same as above 
-            valid <= 1'b1;
+        // Low-part truncated multiply: T_L * M_INV_POS
+        // For each set bit in M_INV_POS, shift T_L left and accumulate
+        // Only keep lower N+2 bits (truncation happens naturally by register width)
+        for (int i = 0; i <= N+1; i++) begin
+            if (M_INV_POS[i])
+                pos_acc = pos_acc + (({1'b0, T_L} << i) & {{1{1'b0}}, {N+2{1'b1}}});
         end
+
+        for (int i = 0; i <= N+1; i++) begin
+            if (M_INV_NEG[i])
+                neg_acc = neg_acc + (({1'b0, T_L} << i) & {{1{1'b0}}, {N+2{1'b1}}});
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        Q_L <= ({1'b1, pos_acc[N+1:0]} - {1'b0, neg_acc[N+1:0]});
+        // D = R - T_L
+        D   <= (~T_L) + 1'b1;
+    end
+endmodule
+
+
+// NFHTM : NAF High-Part Truncated Multiplication
+// U = Q_L ⋉_(N) Mpos  -  Q_L ⋉_(N) Mneg
+//   dcal  = U[d-1:0]            (bottom d bits of U, the CEP region)
+//   dreal = D[N+1 : N+2-d]      (top d bits of D)
+//   Carry  condition: dcal[d-1]=1, dreal[d-1]=0, dcal[d-2:0] > dreal[d-2:0]  => S_H = U + 1
+//   Borrow condition: dcal[d-1]=0, dreal[d-1]=1, dcal[d-2:0] < dreal[d-2:0]  => S_H = U - 1
+//   Otherwise:                                                               => S_H = U
+module NFHTM #(
+    parameter N                 = 4,
+    parameter d                 = 3,
+    // NAF positive part of M
+    parameter [N+1:0] M_POS     = 6'b010000,    // example: Mpos=16
+    // NAF negative part of M
+    parameter [N+1:0] M_NEG     = 6'b000001     // example: Mneg=1 => M=15
+)(
+    input  logic         clk,
+    input  logic [N+1:0] Q_L,
+    input  logic [N+1:0] D,
+    output logic [N-1:0] S_H
+);
+    // Accumulators for high-part truncated multiplication
+    // We need N+d bits: upper N bits are the MSP answer, lower d bits are CEP (dcal)
+    logic [N+d-1:0] pos_acc;
+    logic [N+d-1:0] neg_acc;
+    logic [N+d-1:0] U_full;   // U = pos_acc - neg_acc
+
+    logic [d-1:0]   d_cal;
+    logic [d-1:0]   d_real;
+    logic [N-1:0]   U_msp;    // upper N bits = MSP candidate answer
+
+    always_comb begin
+        pos_acc = '0;   // N+d bits wide
+        neg_acc = '0;
+
+        for (int i = 0; i <= N+1; i++) begin
+            if (M_POS[i]) begin
+                for (int j = 0; j <= N+1; j++) begin
+                    int pos = j + i;
+                    // only accumulate if this lands in MSP+CEP window [2N+3 : N+4-d]
+                    if (pos >= (N+2-d)) begin
+                        pos_acc[pos - (N+2-d)] += Q_L[j];
+                    end
+                end
+            end
+        end
+
+        for (int i = 0; i <= N+1; i++) begin
+            if (M_NEG[i]) begin
+                for (int j = 0; j <= N+1; j++) begin
+                    int pos = j + i;
+                    if (pos >= (N+2-d)) begin
+                        neg_acc[pos - (N+2-d)] += Q_L[j];
+                    end
+                end
+            end
+        end
+
+        U_full = pos_acc - neg_acc;
+
+        // CEP = bottom d bits of accumulator (positions [N+3 : N+4-d] of full product)
+        d_cal  = U_full[d-1 : 0];
+
+        // dreal from D
+        d_real = D[N+1 -: d];
+
+        // MSP = upper N bits of accumulator (positions [2N+3 : N+4] of full product)
+        U_msp  = U_full[N+d-1 : d];
+    end
+
+    always_ff @(posedge clk) begin
+        // Algorithm 4, steps 4-9
+        // Carry:  dcal[d-1]=1, dreal[d-1]=0, dcal[d-2:0] > dreal[d-2:0]
+        if (d_cal[d-1] & ~d_real[d-1] & (d_cal[d-2:0] > d_real[d-2:0]))
+            S_H <= U_msp + 1'b1;
+
+        // Borrow: dcal[d-1]=0, dreal[d-1]=1, dcal[d-2:0] < dreal[d-2:0]
+        else if (~d_cal[d-1] & d_real[d-1] & (d_cal[d-2:0] < d_real[d-2:0]))
+            S_H <= U_msp - 1'b1;
+
+        // No error
+        else
+            S_H <= U_msp;
+    end
+
+endmodule
+
+module final_result_opt #(
+    parameter N = 4
+)(
+    input  logic         clk,
+    input  logic [N-1:0] T_H,
+    input  logic [N-1:0] S_H,
+    input  logic         tl_zero,   // 1 when T_L == 0, pipelined from stage 1
+    output logic [N:0]   C
+);
+    always_ff @(posedge clk) begin
+        if (tl_zero)
+            // T_L=0 => S_H=0 and carry=0 => C = T_H
+            C <= {1'b0, T_H};
+        else
+            // T_L!=0 => carry always 1 => C = T_H + S_H + 1
+            C <= {1'b0, T_H} + {1'b0, S_H} + 1'b1;
+    end
+endmodule
+
+module top_HTMMM_NAF #(
+    parameter N                  = 4,
+    parameter d                  = 3,
+    // NAF of M
+    parameter [N+1:0] M_POS      = 6'b010000,   // Mpos
+    parameter [N+1:0] M_NEG      = 6'b000001,   // Mneg  (M = Mpos - Mneg = 15)
+    // NAF of M' = -M^{-1} mod R
+    parameter [N+1:0] M_INV_POS  = 6'b010000,   // M'pos  (set correctly for your prime)
+    parameter [N+1:0] M_INV_NEG  = 6'b000001    // M'neg
+)(
+    input  logic       clk,
+    input  logic [N-1:0] A,          // 0 <= A < 2M
+    input  logic [N-1:0] B,          // 0 <= B < 2M
+    output logic [N:0] C           // A*B*R^{-1} mod M
+);
+
+    logic [2*N+1:0] T_full;
+    logic [N+1:0]   T_L_s1;
+    logic [N-1:0]   T_H_s1;
+    logic           tl_zero_s1;    // 1 when T_L == 0
+
+    multiply #(.N(N)) u_mul (
+        .clk (clk),
+        .a   ({1'b0, A}),
+        .b   ({1'b0, B}),
+        .T   (T_full),
+        .T_L (T_L_s1),
+        .T_H (T_H_s1)
+    );
+
+    // Register the zero flag in the same FF stage as multiply output
+    // product[N+1:0] is T_L before it is registered inside multiply,
+    // so we check the combinational product directly here
+    logic [2*N+1:0] product_comb;
+    assign product_comb = ({1'b0, A}) * ({1'b0, B});
+
+    always_ff @(posedge clk) begin
+        // Flag is 1 when the lower N+2 bits of the product are all zero
+        tl_zero_s1 <= (product_comb[N+1:0] == '0);
+    end
+
+   
+    logic [N+1:0] Q_L_s2, D_s2;
+    logic [N-1:0] T_H_s2;
+    logic         tl_zero_s2;
+
+    always_ff @(posedge clk) begin
+        T_H_s2     <= T_H_s1;
+        tl_zero_s2 <= tl_zero_s1;
+    end
+
+    NLTM #(
+        .N         (N),
+        .M_INV_POS (M_INV_POS),
+        .M_INV_NEG (M_INV_NEG)
+    ) u_nltm (
+        .clk (clk),
+        .T_L (T_L_s1),
+        .Q_L (Q_L_s2),
+        .D   (D_s2)
+    );
+
  
-        else if (given) begin
-            valid <= 1'b0;
-        end
-    end
-    
-    //same assignment technique as above
-    assign t_htmmm = t_htmmm_reg; 
-    assign tl_zero_out = tl_zerocheck_reg; 
-    assign ready_in = !valid || given;
-    assign ready_out = valid;
-endmodule
-
-
-
-
-// Stage 3: Calculate t[127:64] and final comparison
-module reduction_stage3 (
-    input  logic clk,
-    input  logic [64:0] t_htmmm, 
-    input tl_zero, 
-    input  logic taken,
-    output logic ready_in,
-    output logic [63:0] S,
-    output logic ready_out,
-    input  logic given
-);
-    localparam logic [63:0] N = 64'hFFFFFFFFFFFFFFF1;
-    logic [63:0] S_reg = 64'd0; 
-    logic valid         = 1'b0; 
-    
-    always_ff @(posedge clk) begin
-        if (taken) begin
-            logic [64:0] t;       
-            logic [64:0] t_minus; 
-            t = t_htmmm;  
-            if (t >= {1'b0, N}) begin
-                t_minus = t - {1'b0, N}; 
-                S_reg <= t_minus[63:0];  
-            end else begin
-                S_reg <= t[63:0];        
-            end
-            valid <= 1'b1;
-        end 
-        else if (given) begin
-            valid <= 1'b0;
-        end
-    end
-    
-    assign S = S_reg;
-    assign ready_in = !valid || given;
-    assign ready_out = valid;
-endmodule
-
-
-// reduction module connecting all 3 stages
-module reduction (
-    input  logic clk,
-    input  logic [127:0] T,
-    input  logic taken,
-    output logic ready_in,
-    output logic [63:0] S,
-    output logic ready_out,
-    input  logic given
-);
-    logic [127:0] T_stage1_out;
-    logic [63:0]  m_stage1;
-    logic tl_zero_stage1; 
-    logic ready_out_stage1, ready_in_stage2;
-    logic taken_stage2, given_stage1;
-    
-    logic [64:0] t_htmmm_stage2; 
-    logic tl_zero_stage2;  
-    logic ready_out_stage2, ready_in_stage3;
-    logic taken_stage3, given_stage2;
-    
-    reduction_stage1 u_stage1 (
-        .clk(clk),
-        .T(T),
-        .taken(taken),
-        .ready_in(ready_in),
-        .T_out(T_stage1_out),
-        .m(m_stage1),
-        .ready_out(ready_out_stage1),
-        .given(given_stage1),
-        .tl_zero(tl_zero_stage1) 
-    );
-    
-    assign taken_stage2 = ready_out_stage1 && ready_in_stage2;
-    assign given_stage1 = taken_stage2;
-    
-    reduction_stage2 u_stage2 (
-        .clk(clk),
-        .T(T_stage1_out),
-        .m(m_stage1),
-        .tl_zero(tl_zero_stage1), 
-        .taken(taken_stage2),
-        .ready_in(ready_in_stage2),
-        .t_htmmm(t_htmmm_stage2), 
-        .tl_zero_out(tl_zero_stage2), 
-        .ready_out(ready_out_stage2),
-        .given(given_stage2)
-    );
-    
-    assign taken_stage3 = ready_out_stage2 && ready_in_stage3;
-    assign given_stage2 = taken_stage3;
-    
-    reduction_stage3 u_stage3 (
-        .clk(clk),
-        .t_htmmm(t_htmmm_stage2), 
-        .tl_zero(tl_zero_stage2), 
-        .taken(taken_stage3),
-        .ready_in(ready_in_stage3),
-        .S(S),
-        .ready_out(ready_out),
-        .given(given)
-    );
-endmodule
-
-
-module montgomery_convert_in (
-    input  logic clk,
-    input  logic [63:0] a,
-    input  logic taken,
-    output logic ready_in,
-    output logic [63:0] a_bar,
-    output logic ready_out,
-    input  logic given
-);
-    localparam logic [63:0] R2 = 64'he1;
-    logic [127:0] T = 128'd0;   
-    logic valid_mult = 1'b0;     
-    logic ready_redc_in;
-    logic given_to_redc;
+    logic [N-1:0] S_H_s3;
+    logic [N-1:0] T_H_s3;
+    logic         tl_zero_s3;
 
     always_ff @(posedge clk) begin
-        if (taken) begin
-            T <= ({64'd0, a} * {64'd0, R2}); 
-            valid_mult <= 1'b1;
-        end 
-        else if (given_to_redc) begin
-            valid_mult <= 1'b0;
-        end
+        T_H_s3     <= T_H_s2;
+        tl_zero_s3 <= tl_zero_s2;
     end
 
-    assign ready_in = !valid_mult || ready_redc_in;
-    assign given_to_redc = valid_mult && ready_redc_in;
-
-    reduction u_redc (
-        .clk(clk),
-        .T(T),
-        .taken(given_to_redc),
-        .ready_in(ready_redc_in),
-        .S(a_bar),
-        .ready_out(ready_out),
-        .given(given)
-    );
-endmodule
-
-
-module montgomery_mul (
-    input  logic clk,
-    input  logic [63:0] a_bar,
-    input  logic [63:0] b_bar,
-    input  logic taken,
-    output logic ready_in,
-    output logic [63:0] out_bar,
-    output logic ready_out,
-    input  logic given
-);
-    logic [127:0] T = 128'd0; 
-    logic valid_mult = 1'b0;  
-    logic ready_redc_in;
-    logic given_to_redc;
-
-    always_ff @(posedge clk) begin
-        if (taken) begin
-            T <= ({64'd0, a_bar} * {64'd0, b_bar}); 
-            valid_mult <= 1'b1;
-        end 
-        else if (given_to_redc) begin
-            valid_mult <= 1'b0;
-        end
-    end
-
-    assign ready_in = !valid_mult || ready_redc_in;
-    assign given_to_redc = valid_mult && ready_redc_in;
-
-    reduction u_redc (
-        .clk(clk),
-        .T(T),
-        .taken(given_to_redc),
-        .ready_in(ready_redc_in),
-        .S(out_bar),
-        .ready_out(ready_out),
-        .given(given)
-    );
-endmodule
-
-
-module montgomery_convert_out (
-    input  logic clk,
-    input  logic [63:0] a_bar,
-    input  logic taken,
-    output logic ready_in,
-    output logic [63:0] a,
-    output logic ready_out,
-    input  logic given
-);
-    logic [127:0] T = 128'd0; 
-    logic valid_prep = 1'b0;  
-    logic ready_redc_in;
-    logic given_to_redc;
-
-    always_ff @(posedge clk) begin
-        if (taken) begin
-            T <= {64'd0, a_bar};
-            valid_prep <= 1'b1;
-        end else if (given_to_redc) begin
-            valid_prep <= 1'b0;
-        end
-    end
-
-    assign ready_in = !valid_prep || ready_redc_in;
-    assign given_to_redc = valid_prep && ready_redc_in;
-
-    reduction u_redc (
-        .clk(clk),
-        .T(T),
-        .taken(given_to_redc),
-        .ready_in(ready_redc_in),
-        .S(a),
-        .ready_out(ready_out),
-        .given(given)
-    );
-endmodule
-
-
-module montgomery_top (
-    input  logic clk,
-    input  logic [63:0] a,
-    input  logic [63:0] b,
-    input  logic taken,
-    output logic ready_in,
-    output logic [63:0] result,
-    output logic ready_out,
-    input  logic given
-);
-    logic [63:0] a_bar, b_bar, ab_bar;
-    logic ready_in_a, ready_in_b, ready_in_mul, ready_in_out;
-    logic ready_out_a, ready_out_b, ready_out_mul;
-    logic taken_a, taken_b, taken_mul, taken_out;
-    logic given_a, given_b, given_mul;
-    
-    logic [63:0] a_reg = 64'd0, b_reg = 64'd0;
-    logic inputs_valid = 1'b0;
-
-    always_ff @(posedge clk) begin
-        if (taken) begin
-            a_reg <= a;
-            b_reg <= b;
-            inputs_valid <= 1'b1;
-        end else if (taken_a && taken_b) begin
-            inputs_valid <= 1'b0;
-        end
-    end
-
-    assign ready_in = !inputs_valid || (ready_in_a && ready_in_b);
-    assign taken_a = inputs_valid && ready_in_a && ready_in_b;
-    assign taken_b = taken_a;
-
-    montgomery_convert_in u_in_a (
-        .clk(clk), .a(a_reg), .taken(taken_a),
-        .ready_in(ready_in_a), .a_bar(a_bar),
-        .ready_out(ready_out_a), .given(given_a)
+    NFHTM #(
+        .N     (N),
+        .d     (d),
+        .M_POS (M_POS),
+        .M_NEG (M_NEG)
+    ) u_nfhtm (
+        .clk (clk),
+        .Q_L (Q_L_s2),
+        .D   (D_s2),
+        .S_H (S_H_s3)
     );
 
-    montgomery_convert_in u_in_b (
-        .clk(clk), .a(b_reg), .taken(taken_b),
-        .ready_in(ready_in_b), .a_bar(b_bar),
-        .ready_out(ready_out_b), .given(given_b)
+ 
+    //   tl_zero=1  =>  C = T_H          (S_H=0, carry=0, bypass addition)
+    //   tl_zero=0  =>  C = T_H + S_H + 1 (carry always 1 when T_L != 0)
+   
+    final_result_opt #(.N(N)) u_final (
+        .clk    (clk),
+        .T_H    (T_H_s3),
+        .S_H    (S_H_s3),
+        .tl_zero(tl_zero_s3),
+        .C      (C)
     );
 
-    assign taken_mul = ready_out_a && ready_out_b && ready_in_mul;
-    assign given_a = taken_mul;
-    assign given_b = taken_mul;
-
-    montgomery_mul u_mul (
-        .clk(clk), .a_bar(a_bar), .b_bar(b_bar),
-        .taken(taken_mul), .ready_in(ready_in_mul),
-        .out_bar(ab_bar), .ready_out(ready_out_mul),
-        .given(given_mul)
-    );
-
-    assign taken_out = ready_out_mul && ready_in_out;
-    assign given_mul = taken_out;
-
-    montgomery_convert_out u_out (
-        .clk(clk), .a_bar(ab_bar), .taken(taken_out),
-        .ready_in(ready_in_out), .a(result),
-        .ready_out(ready_out), .given(given)
-    );
 endmodule
