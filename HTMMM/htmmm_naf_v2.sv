@@ -60,8 +60,7 @@ module NLTM #(
     end
 
     always_ff @(posedge clk) begin
-        Q_L <= ({1'b1, pos_acc[N+1:0]} - {1'b0, neg_acc[N+1:0]})[N+1:0];
-
+        Q_L <= ({1'b1, pos_acc[N+1:0]} - {1'b0, neg_acc[N+1:0]});
         // D = R - T_L
         D   <= (~T_L) + 1'b1;
     end
@@ -105,7 +104,7 @@ module NFHTM #(
         for (int i = 0; i <= N+1; i++) begin
             if (M_POS[i]) begin
                 for (int j = 0; j <= N+1; j++) begin
-                    automatic int pos = j + i;
+                    int pos = j + i;
                     // only accumulate if this lands in MSP+CEP window [2N+3 : N+4-d]
                     if (pos >= (N+2-d)) begin
                         pos_acc[pos - (N+2-d)] += Q_L[j];
@@ -117,7 +116,7 @@ module NFHTM #(
         for (int i = 0; i <= N+1; i++) begin
             if (M_NEG[i]) begin
                 for (int j = 0; j <= N+1; j++) begin
-                    automatic int pos = j + i;
+                    int pos = j + i;
                     if (pos >= (N+2-d)) begin
                         neg_acc[pos - (N+2-d)] += Q_L[j];
                     end
