@@ -7,8 +7,8 @@ module htmmm_tb;
     parameter d = 3;
     parameter [N+1:0] M_POS     = 6'b010000;
     parameter [N+1:0] M_NEG     = 6'b000001;
-    parameter [N+1:0] M_INV_POS = 6'b010000;
-    parameter [N+1:0] M_INV_NEG = 6'b000001;
+    parameter [N+1:0] M_INV_POS = 6'b010001;
+    parameter [N+1:0] M_INV_NEG = 6'b000000;
 
     // DUT signals
     logic           clk;

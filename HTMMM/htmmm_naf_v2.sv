@@ -1,12 +1,11 @@
-module multiply #(
-    parameter N = 4
-)(
-    input  logic             clk,
-    input  logic [N+1:0]     a,
-    input  logic [N+1:0]     b,
-    output logic [2*N+1:0]   T,
-    output logic [N+1:0]     T_L,
-    output logic [N-1:0]     T_H
+module multiply #(parameter N = 4)(
+    input  logic           clk,
+    input  logic [N+1:0]   a,
+    input  logic [N+1:0]   b,
+    output logic [2*N+1:0] T,
+    output logic [N+1:0]   T_L,
+    output logic [N-1:0]   T_H,
+    output logic           tl_zero  
 );
     logic [2*N+1:0] product;
 
@@ -15,9 +14,10 @@ module multiply #(
     end
 
     always_ff @(posedge clk) begin
-        T   <= product;
-        T_L <= product[N+1:0];
-        T_H <= product[2*N+1 : N+2];
+        T       <= product;
+        T_L     <= product[N+1:0];
+        T_H     <= product[2*N+1 : N+2];
+        tl_zero <= (product[N+1:0] == '0);  // same FF stage, no extra multiplier
     end
 endmodule
 
@@ -28,9 +28,9 @@ endmodule
 module NLTM #(
     parameter N = 4,
     // NAF positive part of M'
-    parameter [N+1:0] M_INV_POS  = 6'b010000,   // example: +16
+    parameter [N+1:0] M_INV_POS  = 6'b010001,   // example: +16
     // NAF negative part of M'
-    parameter [N+1:0] M_INV_NEG  = 6'b000001    // example: -1  => M'=15
+    parameter [N+1:0] M_INV_NEG  = 6'b000000    // example: -1  => M'=15
 )(
     input  logic         clk,
     input  logic [N+1:0] T_L,
@@ -97,7 +97,7 @@ module NFHTM #(
     logic [d-1:0]   d_real;
     logic [N-1:0]   U_msp;    // upper N bits = MSP candidate answer
 
-    always_comb begin
+    always @ * begin
         pos_acc = '0;   // N+d bits wide
         neg_acc = '0;
 
@@ -155,65 +155,59 @@ endmodule
 
 module final_result_opt #(
     parameter N = 4
-)(
-    input  logic         clk,
-    input  logic [N-1:0] T_H,
-    input  logic [N-1:0] S_H,
-    input  logic         tl_zero,   // 1 when T_L == 0, pipelined from stage 1
-    output logic [N:0]   C
-);
+    )(
+        input  logic         clk,
+        input  logic [N-1:0] T_H,
+        input  logic [N-1:0] S_H,
+        input  logic         tl_zero,
+        output logic [N:0]   C
+    );
+
     always_ff @(posedge clk) begin
         if (tl_zero)
-            // T_L=0 => S_H=0 and carry=0 => C = T_H
-            C <= {1'b0, T_H};
+            C <= {1'b0, T_H};   
         else
-            // T_L!=0 => carry always 1 => C = T_H + S_H + 1
             C <= {1'b0, T_H} + {1'b0, S_H} + 1'b1;
     end
+
 endmodule
 
 module top_HTMMM_NAF #(
     parameter N                  = 4,
     parameter d                  = 3,
     // NAF of M
-    parameter [N+1:0] M_POS      = 6'b010000,   // Mpos
-    parameter [N+1:0] M_NEG      = 6'b000001,   // Mneg  (M = Mpos - Mneg = 15)
+    parameter [N+1:0] M_POS      = 6'b010000,
+    parameter [N+1:0] M_NEG      = 6'b000001,   // M = Mpos - Mneg = 15
     // NAF of M' = -M^{-1} mod R
-    parameter [N+1:0] M_INV_POS  = 6'b010000,   // M'pos  (set correctly for your prime)
-    parameter [N+1:0] M_INV_NEG  = 6'b000001    // M'neg
+    parameter [N+1:0] M_INV_POS  = 6'b010001,
+    parameter [N+1:0] M_INV_NEG  = 6'b000000,
+    // R^2 mod M — precomputed constant for final Montgomery conversion
+    parameter [N-1:0] R2_MODM    = 4'd1       // R^2 mod 15 = 1 for N=4, R=2^(N+2)=64
 )(
-    input  logic       clk,
+    input  logic         clk,
     input  logic [N-1:0] A,          // 0 <= A < 2M
     input  logic [N-1:0] B,          // 0 <= B < 2M
-    output logic [N-1:0] C           // A*B*R^{-1} mod M
+    output logic [N-1:0] C           // A*B mod M
 );
 
+    // STAGE 1: Multiply A * B
     logic [2*N+1:0] T_full;
     logic [N+1:0]   T_L_s1;
     logic [N-1:0]   T_H_s1;
-    logic           tl_zero_s1;    // 1 when T_L == 0
+    logic           tl_zero_s1;
 
     multiply #(.N(N)) u_mul (
         .clk (clk),
-        .a   ({1'b0, A}),
-        .b   ({1'b0, B}),
+        .a   ({2'b00, A}),
+        .b   ({2'b00, B}),
         .T   (T_full),
         .T_L (T_L_s1),
-        .T_H (T_H_s1)
+        .T_H (T_H_s1),
+        .tl_zero (tl_zero_s1)
     );
 
-    // Register the zero flag in the same FF stage as multiply output
-    // product[N+1:0] is T_L before it is registered inside multiply,
-    // so we check the combinational product directly here
-    logic [2*N+1:0] product_comb;
-    assign product_comb = ({1'b0, A}) * ({1'b0, B});
 
-    always_ff @(posedge clk) begin
-        // Flag is 1 when the lower N+2 bits of the product are all zero
-        tl_zero_s1 <= (product_comb[N+1:0] == '0);
-    end
-
-   
+    // STAGE 2: Nlow-part truncated multiply by M'
     logic [N+1:0] Q_L_s2, D_s2;
     logic [N-1:0] T_H_s2;
     logic         tl_zero_s2;
@@ -234,7 +228,7 @@ module top_HTMMM_NAF #(
         .D   (D_s2)
     );
 
- 
+    // STAGE 3: high-part truncated multiply by M
     logic [N-1:0] S_H_s3;
     logic [N-1:0] T_H_s3;
     logic         tl_zero_s3;
@@ -256,16 +250,106 @@ module top_HTMMM_NAF #(
         .S_H (S_H_s3)
     );
 
- 
-    //   tl_zero=1  =>  C = T_H          (S_H=0, carry=0, bypass addition)
-    //   tl_zero=0  =>  C = T_H + S_H + 1 (carry always 1 when T_L != 0)
-   
+    //   tl_zero=1 => C = T_H
+    //   tl_zero=0 => C = T_H + S_H + 1
+    logic [N-1:0] C_raw;
+
     final_result_opt #(.N(N)) u_final (
-        .clk    (clk),
-        .T_H    (T_H_s3),
-        .S_H    (S_H_s3),
-        .tl_zero(tl_zero_s3),
-        .C      (C)
+        .clk     (clk),
+        .T_H     (T_H_s3),
+        .S_H     (S_H_s3),
+        .tl_zero (tl_zero_s3),
+        .C       (C_raw)
     );
+
+    // STAGE 5 ensure C_raw is in [0, M)
+    localparam logic [N:0] M_val = M_POS[N:0] - M_NEG[N:0];
+
+    logic [N-1:0] C_red;
+
+    always_ff @(posedge clk) begin
+        if ({1'b0, C_raw} >= M_val)
+            C_red <= C_raw - M_val[N-1:0];
+        else
+            C_red <= C_raw;
+    end
+
+    // STAGE 6-9: Final MMM — convert out of Montgomery domain
+    // Reuse the same MMM pipeline with C_red and R2_MODM as inputs
+    logic [2*N+1:0] T2_full;
+    logic [N+1:0]   T2_L_s1;
+    logic [N-1:0]   T2_H_s1;
+    logic           tl2_zero_s1;
+
+    multiply #(.N(N)) u_mul2 (
+        .clk (clk),
+        .a   ({2'b00, C_red}),
+        .b   ({2'b00, R2_MODM}),
+        .T   (T2_full),
+        .T_L (T2_L_s1),
+        .T_H (T2_H_s1),
+        .tl_zero (tl2_zero_s1)
+    );
+
+
+
+    logic [N+1:0] Q2_L_s2, D2_s2;
+    logic [N-1:0] T2_H_s2;
+    logic         tl2_zero_s2;
+
+    always_ff @(posedge clk) begin
+        T2_H_s2     <= T2_H_s1;
+        tl2_zero_s2 <= tl2_zero_s1;
+    end
+
+    NLTM #(
+        .N         (N),
+        .M_INV_POS (M_INV_POS),
+        .M_INV_NEG (M_INV_NEG)
+    ) u_nltm2 (
+        .clk (clk),
+        .T_L (T2_L_s1),
+        .Q_L (Q2_L_s2),
+        .D   (D2_s2)
+    );
+
+    logic [N-1:0] S2_H_s3;
+    logic [N-1:0] T2_H_s3;
+    logic         tl2_zero_s3;
+
+    always_ff @(posedge clk) begin
+        T2_H_s3     <= T2_H_s2;
+        tl2_zero_s3 <= tl2_zero_s2;
+    end
+
+    NFHTM #(
+        .N     (N),
+        .d     (d),
+        .M_POS (M_POS),
+        .M_NEG (M_NEG)
+    ) u_nfhtm2 (
+        .clk (clk),
+        .Q_L (Q2_L_s2),
+        .D   (D2_s2),
+        .S_H (S2_H_s3)
+    );
+
+    logic [N-1:0] C2_raw;
+
+    final_result_opt #(.N(N)) u_final2 (
+        .clk     (clk),
+        .T_H     (T2_H_s3),
+        .S_H     (S2_H_s3),
+        .tl_zero (tl2_zero_s3),
+        .C       (C2_raw)
+    );
+
+    // Final modular reduction after second MMM
+    always_ff @(posedge clk) begin
+        if ({1'b0, C2_raw} >= M_val)
+            C <= C2_raw - M_val[N-1:0];
+        else
+            C <= C2_raw;
+    end
 
 endmodule
