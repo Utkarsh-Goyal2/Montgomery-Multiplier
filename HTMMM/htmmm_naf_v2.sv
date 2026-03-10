@@ -99,51 +99,41 @@ module NFHTM #(
     logic [N-1:0]   U_msp;    // upper N bits = MSP candidate answer
 
     always_comb begin
-        pos_acc = '0;
+        pos_acc = '0;   // N+d bits wide
         neg_acc = '0;
 
-        // High-part truncated multiply: Q_L * M_POS
-        // We want bits [(2N+2)-1 : N+2] of Q_L*M but shifted:
-        // since Q_L is N+2 bits and M is N+2 bits, full product is 2N+4 bits
-        // MSP = upper N bits = bits [2N+3 : N+4]  ... but we also need d CEP bits below that
-        // So we accumulate bits [N+3+d-1 : N+4-d] — i.e. we keep N+d bits starting
-        // from bit position (N+2-d) of the full product
-        //
-        // Concretely: for each set bit i in M_POS, contribution is Q_L << i
-        // We extract bits [N+1+d : N+2] of that shifted value (N+d bits total)
         for (int i = 0; i <= N+1; i++) begin
             if (M_POS[i]) begin
-                // full contribution at bit position i: Q_L[N+1:0] << i
-                // we want bits [(N+2+d-1) : (N+2-0)] relative to bit 0 of full product
-                // i.e. bits [N+d+1 : N+2] of (Q_L << i)
-                // which equals Q_L >> (N+2 - d - ... )  -- handle per shift amount
-                // Simpler: form the (2N+4)-bit product contribution, then slice
-                logic [2*N+5:0] contrib;
-                contrib = ({1'b0, Q_L} << i);
-                // Slice out N+d bits starting at bit (N+2-d) of contrib
-                pos_acc = pos_acc + contrib[N+1+d : N+2-0+0];
-                // Note: contrib[N+1+d -: (N+d)] = contrib[N+1+d : 2]  for d=3,N=4
+                for (int j = 0; j <= N+1; j++) begin
+                    automatic int pos = j + i;
+                    // only accumulate if this lands in MSP+CEP window [2N+3 : N+4-d]
+                    if (pos >= (N+2-d)) begin
+                        pos_acc[pos - (N+2-d)] += Q_L[j];
+                    end
+                end
             end
         end
 
         for (int i = 0; i <= N+1; i++) begin
             if (M_NEG[i]) begin
-                logic [2*N+5:0] contrib;
-                contrib = ({1'b0, Q_L} << i);
-                neg_acc = neg_acc + contrib[N+1+d : N+2-0+0];
+                for (int j = 0; j <= N+1; j++) begin
+                    automatic int pos = j + i;
+                    if (pos >= (N+2-d)) begin
+                        neg_acc[pos - (N+2-d)] += Q_L[j];
+                    end
+                end
             end
         end
 
-        // U = Mpos part - Mneg part
         U_full = pos_acc - neg_acc;
 
-        // CEP: bottom d bits of U
+        // CEP = bottom d bits of accumulator (positions [N+3 : N+4-d] of full product)
         d_cal  = U_full[d-1 : 0];
 
-        // dreal: top d bits of D  (Algorithm 4 step 1: dreal = D[N+1 : N+2-d])
+        // dreal from D
         d_real = D[N+1 -: d];
 
-        // MSP candidate: upper N bits of U
+        // MSP = upper N bits of accumulator (positions [2N+3 : N+4] of full product)
         U_msp  = U_full[N+d-1 : d];
     end
 
@@ -164,9 +154,6 @@ module NFHTM #(
 
 endmodule
 
-
-
-
 module final_result_opt #(
     parameter N = 4
 )(
@@ -186,8 +173,6 @@ module final_result_opt #(
     end
 endmodule
 
-
-
 module top_HTMMM_NAF #(
     parameter N                  = 4,
     parameter d                  = 3,
@@ -199,9 +184,9 @@ module top_HTMMM_NAF #(
     parameter [N+1:0] M_INV_NEG  = 6'b000001    // M'neg
 )(
     input  logic       clk,
-    input  logic [N:0] A,          // 0 <= A < 2M
-    input  logic [N:0] B,          // 0 <= B < 2M
-    output logic [N:0] C           // A*B*R^{-1} mod M
+    input  logic [N-1:0] A,          // 0 <= A < 2M
+    input  logic [N-1:0] B,          // 0 <= B < 2M
+    output logic [N-1:0] C           // A*B*R^{-1} mod M
 );
 
     logic [2*N+1:0] T_full;
