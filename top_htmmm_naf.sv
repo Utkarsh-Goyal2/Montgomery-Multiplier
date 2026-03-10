@@ -275,12 +275,8 @@ module top_HTMMM_NAF #(
     );
 
     // Stage 5: final conditional subtraction by M
-    logic [N:0] M_val;
+    localparam logic [N:0] M_val = M_POS[N:0] - M_NEG[N:0];
     logic [N:0] C_red;
-
-    always_comb begin
-        M_val = M_POS[N:0] - M_NEG[N:0];
-    end
 
     always_ff @(posedge clk) begin
         if (C_raw >= M_val)
@@ -289,7 +285,8 @@ module top_HTMMM_NAF #(
             C_red <= C_raw;
     end
 
-    // Stage 6: convert Montgomery result back to normal modulus
+    // Stage 6: convert Montgomery result back to normal result
+    // Here R = 64 and M = 15, so R mod M = 4
     logic [N+2:0] C_times_R;
     logic [N:0]   C_norm;
 
